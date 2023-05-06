@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+import argparse
+import select
+import sys
+import time
+
+
+def flush_chunk(chunk):
+    """
+    Flushes a chunk to standard output with trailing newline.
+    """
+    sys.stdout.write(chunk + '\n')
+    sys.stdout.flush()
+
+
+def positive_int(value):
+    int_value = int(value)
+    if int_value <= 0:
+        raise argparse.ArgumentTypeError("%s is not a positive integer" % value)
+    return int_value
+
+
+def non_negative_float(value):
+    float_value = float(value)
+    if float_value < 0:
+        raise argparse.ArgumentTypeError("%s is not a positive number" % value)
+    return float_value
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='Merges separate lines together from standard input, '
+                    'escaping new line characters, and outputting them in chunks '
+                    'to standard output limited by time and/or character count.')
+    parser.add_argument('--max-chars', '-c', type=positive_int, default=8192,
+                        help='Maximum number of characters per output chunk '
+                             '(default is 8192 bytes)')
+    parser.add_argument('--max-time', '-t', type=non_negative_float, default=0.1,
+                        help='Maximum time to wait before outputting a chunk, '
+                             'in seconds (default is 0.1)')
+    args = parser.parse_args()
+
+    # Maximum output chunk size (in characters)
+    max_chunk_size = args.max_chars
+    max_find_index = max_chunk_size - 1
+
+    # Maximum time to wait before outputting a chunk (in seconds)
+    max_wait_time = args.max_time
+
+    # We don't start waiting until we have something in the buffer
+    start_wait_time = None
+    buffer = ""
+    end_of_file = False
+    while True:
+        # Check if we've hit the maximum chunk size or wait time since the last input
+        elapsed_time = time.monotonic() - start_wait_time if start_wait_time else 0
+        if buffer and elapsed_time >= max_wait_time or len(buffer) >= max_find_index or end_of_file:
+            if len(buffer) > max_find_index:
+                # If there are multiple lines, try breaking at end of previous line
+                last_break = buffer.rfind('\\n', 0, max_find_index) + 2
+                if last_break < 2:
+                    # If there is no break within the chunk, try breaking before the closest space
+                    last_break = buffer.rfind(' ', 0, max_find_index) + 1
+
+                if last_break >= 1:
+                    flush_chunk(buffer[:last_break])
+                    buffer = buffer[last_break:]
+                else:
+                    # If there's no suitable break point, just cut it off mid-line
+                    flush_chunk(buffer[:max_find_index])
+                    buffer = buffer[max_find_index:]
+            else:
+                flush_chunk(buffer)
+                buffer = ""
+
+            # If there is input left in the buffer, restart the wait timer, otherwise stop the timer
+            start_wait_time = time.monotonic() if buffer else None
+            elapsed_time = 0
+
+        # If there is data in the buffer, wait until the max time or until there is new input
+        if buffer:
+            remaining_time = max_wait_time - elapsed_time if elapsed_time < max_wait_time else 0
+            ready, _, _ = select.select([sys.stdin], [], [], remaining_time)
+            if not ready:
+                # No data available to be read, we must have exceeded the maximum wait time
+                continue
+
+        # Block until there is a line from standard input or end of file
+        line = sys.stdin.readline()
+        if not line:
+            # End-of-file reached, flush any remaining unprocessed input and break out of loop
+            end_of_file = True
+            if buffer:
+                continue
+            break
+
+        # Add line to the buffer, escaping the new line
+        buffer += line.replace('\n', '\\n')
+
+        # If the wait timer hasn't been started yet, then start it now
+        start_wait_time = start_wait_time if start_wait_time else time.monotonic()
+
+
+if __name__ == '__main__':
+    main()
